@@ -4,9 +4,9 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from torch.utils.data import Dataset
+from transformers import PreTrainedTokenizerBase
 
 from data_types import MiniBatch
-from tokenizer import Tokenizer
 
 SYSTEM_MESSAGE = (
     "You are a helpful assistant. You first think about the reasoning process "
@@ -26,7 +26,7 @@ class CountdownTasksDataset(Dataset):
 
     def __init__(
         self,
-        tokenizer: Tokenizer,
+        tokenizer: PreTrainedTokenizerBase,
         data_path: str,
         split: str = "train",
         test_size: int = 100,
@@ -49,18 +49,22 @@ class CountdownTasksDataset(Dataset):
     def encode_prefix(self, numbers: List[int], target: int):
         """Prefix is the *actual* input to the model."""
         user_message = USER_TEMPLATE.format(numbers=numbers, target=target)
-        prefix = self.tokenizer.encode_chat_with_response_prompt(
-            [
-                {"role": "system", "content": SYSTEM_MESSAGE},
-                {"role": "user", "content": user_message},
-            ],
-            RESPONSE_PROMPT,
+        messages = [
+            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "user", "content": user_message},
+        ]
+        prefix = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
         )
-        tokens = self.tokenizer.tokenize(prefix)
+        prefix = prefix + RESPONSE_PROMPT
+        prefix_token_ids = self.tokenizer.encode(prefix, add_special_tokens=False)
+        prefix_tokens = self.tokenizer.convert_ids_to_tokens(prefix_token_ids)
         return {
             "prefix": prefix,
-            "prefix_tokens": tokens.tokens,
-            "prefix_token_ids": tokens.ids,
+            "prefix_tokens": prefix_tokens,
+            "prefix_token_ids": prefix_token_ids,
         }
 
     @staticmethod
@@ -111,7 +115,9 @@ def format_reward_function(response: str, end_token: Optional[str] = None) -> fl
 
 
 def answer_reward_function(
-    response: str, numbers: List[int] = None, target: int = None
+    response: str,
+    numbers: list[int] | None = None,
+    target: int | None = None,
 ) -> float:
     """
     Checks if the answer uses all numbers exactly once and evaluates to the target

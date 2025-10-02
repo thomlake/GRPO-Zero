@@ -6,97 +6,81 @@ from typing import Callable, List
 
 import numpy as np
 import torch
+from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from data_types import Episode, MiniBatch
-from qwen2_model import Transformer
-from tokenizer import Tokenizer
 
 
 @torch.no_grad()
 def rollout(
-    model: Transformer,
+    model: PreTrainedModel,
     batch: MiniBatch,
-    tokenizer: Tokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     max_gen_len: int,
     num_answer_per_question: int,
     reward_function: Callable,
     device: torch.device,
     dtype: torch.dtype,
 ) -> List[Episode]:
-    end_token = tokenizer.eos_token
-    end_token_id = tokenizer.eos_token_id
+    eos_token = tokenizer.eos_token
+    eos_token_id = tokenizer.eos_token_id
     pad_token_id = tokenizer.pad_token_id
     prefix_token_ids = batch.prefix_token_ids
-    bsz = len(batch.prefix) * num_answer_per_question
-    min_prompt_len = min(len(t) for t in prefix_token_ids)
-    max_prompt_len = max(len(t) for t in prefix_token_ids)
-    total_len = max_gen_len + max_prompt_len
-    model.init_kv_cache(
-        max_batch_size=bsz,
-        max_seq_len=total_len,
-        device=device,
-        dtype=dtype,
-    )
-    tokens = torch.full((bsz, total_len), pad_token_id, dtype=torch.long, device=device)
-    for k, t in enumerate(prefix_token_ids):
-        offset = k * num_answer_per_question
-        for i in range(num_answer_per_question):
-            tokens[offset + i, : len(t)] = torch.tensor(
-                t, dtype=torch.long, device=device
-            )
 
-    prev_pos = 0
-    input_text_mask = tokens != pad_token_id
-    assert min_prompt_len < total_len
-    is_finished = torch.zeros((bsz,), dtype=torch.bool, device=device)
+    # Prepare input_ids by repeating each prefix num_answer_per_question times
+    input_ids = []
+    for token_ids in prefix_token_ids:
+        for _ in range(num_answer_per_question):
+            input_ids.append(token_ids)
 
-    for cur_pos in range(min_prompt_len, total_len):
-        print(
-            f"\r* Generating trajectories: {cur_pos-min_prompt_len:>4d}/{total_len-min_prompt_len:>4d}",
-            flush=True,
-            end="",
+    # Pad to same length
+    max_len = max(len(ids) for ids in input_ids)
+    input_ids_padded = []
+    attention_mask = []
+    for ids in input_ids:
+        pad_len = max_len - len(ids)
+        input_ids_padded.append([pad_token_id] * pad_len + ids)
+        attention_mask.append([0] * pad_len + [1] * len(ids))
+
+    input_ids_tensor = torch.tensor(input_ids_padded, dtype=torch.long, device=device)
+    attention_mask_tensor = torch.tensor(attention_mask, dtype=torch.long, device=device)
+
+    # Generate
+    with torch.autocast(device_type=device.type, dtype=dtype):
+        outputs = model.generate(
+            input_ids=input_ids_tensor,
+            attention_mask=attention_mask_tensor,
+            max_new_tokens=max_gen_len,
+            do_sample=True,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
         )
-        with torch.autocast(device_type=device.type, dtype=dtype):
-            logits = model.inference(tokens[:, prev_pos:cur_pos], prev_pos)
-        probs = torch.softmax(logits[:, -1], dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
-        next_token = next_token.reshape(-1)
-        next_token = torch.where(
-            input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
-        )
-        # if an rollout is finished, we fill the rest of the tokens with pad_token_id
-        next_token = torch.where(is_finished, pad_token_id, next_token)
-        tokens[:, cur_pos] = next_token
-        if end_token_id is not None:
-            is_end_token = next_token == end_token_id
-            is_generated_token = ~input_text_mask[:, cur_pos]
-            is_finished = is_finished | (is_end_token & is_generated_token)
-        prev_pos = cur_pos
-        if is_finished.all():
-            break
-    model.del_kv_cache()
-    gc.collect()
-    torch.cuda.empty_cache()
-    is_finished_list = is_finished.tolist()
-    tokens_list = tokens.tolist()
 
-    # prepare the output episodes
+    # Process outputs into episodes
     episodes = []
-    for i in range(bsz // num_answer_per_question):
+    for i in range(len(batch.prefix)):
         for j in range(num_answer_per_question):
             idx = i * num_answer_per_question + j
-            generated_token_ids = tokens_list[idx][len(batch.prefix_token_ids[i]) :]
-            # remove padding tokens
+            full_token_ids = outputs[idx].tolist()
+            prefix_len = len(input_ids[idx])
+            generated_token_ids = full_token_ids[prefix_len:]
+
+            # Remove padding and eos tokens
             if pad_token_id in generated_token_ids:
-                generated_token_ids = generated_token_ids[
-                    : generated_token_ids.index(pad_token_id)
-                ]
-            generated_text = tokenizer.detokenize(generated_token_ids)
+                generated_token_ids = generated_token_ids[:generated_token_ids.index(pad_token_id)]
+            if eos_token_id in generated_token_ids:
+                eos_idx = generated_token_ids.index(eos_token_id)
+                generated_token_ids = generated_token_ids[:eos_idx]
+                is_finished = True
+            else:
+                is_finished = False
+
+            generated_text = tokenizer.decode(generated_token_ids, skip_special_tokens=False)
             rewards = reward_function(
                 response=generated_text,
                 numbers=batch.numbers[i],
                 target=batch.target[i],
-                end_token=end_token,
+                end_token=eos_token,
             )
             episode = Episode(
                 prefix=batch.prefix[i],
@@ -104,13 +88,12 @@ def rollout(
                 prefix_token_ids=batch.prefix_token_ids[i],
                 prefix_tokens=batch.prefix_tokens[i],
                 generated_token_ids=generated_token_ids,
-                is_finished=is_finished_list[idx],
+                is_finished=is_finished,
                 reward=rewards["reward"],
                 reward_info=rewards["reward_info"],
             )
             episodes.append(episode)
-    # clear the output line
-    print("\r", end=" " * 100, flush=True)
+
     return episodes
 
 
@@ -119,6 +102,7 @@ def normalize_rewards_per_group(episodes: List[Episode]) -> List[Episode]:
     groups = defaultdict(list)
     for episode in episodes:
         groups[tuple(episode.prefix)].append(episode)
+
     output = []
     for group in groups.values():
         group_rewards = [item.reward for item in group]
@@ -149,18 +133,23 @@ def update_policy(
 ):
     """Update the policy using the GRPO algorithm."""
     episodes = normalize_rewards_per_group(episodes)
+
     # sort episodes by token length for efficient (micro-)batching
     episodes.sort(key=lambda x: len(x.prefix_token_ids) + len(x.generated_token_ids))
     num_micro_batches = math.ceil(len(episodes) / micro_batch_size)
     num_target_tokens = sum(len(episode.generated_token_ids) for episode in episodes)
-    entropy = 0.0
 
-    for i in range(0, len(episodes), micro_batch_size):
+    step_count = 0
+    sum_loss = 0.0
+    sum_entropy = 0.0
+
+    for batch_idx, i in enumerate(range(0, len(episodes), micro_batch_size), start=1):
         print(
-            f"\r* Computing policy gradient: {i:>2d}/{len(episodes):>2d}",
+            f"\r* Computing policy gradient: {batch_idx}/{num_micro_batches}",
             flush=True,
             end="",
         )
+        step_count += 1
         j = min(i + micro_batch_size, len(episodes))
         batch_episodes = episodes[i:j]
         batch_lengths = [
@@ -191,7 +180,7 @@ def update_policy(
             input_token_ids = batch_token_ids[:, :-1]
             target_token_ids = batch_token_ids[:, 1:]
             target_masks = batch_masks[:, 1:]
-            logits = model.forward(input_token_ids).float()
+            logits = model(input_token_ids).logits.float()
 
         log_probs = -torch.nn.functional.cross_entropy(
             logits.reshape(-1, logits.size(-1)),
@@ -202,13 +191,14 @@ def update_policy(
 
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
-            entropy = entropy + (token_entropy * target_masks).sum() / num_target_tokens
+            sum_entropy += (token_entropy * target_masks).sum().item() / num_target_tokens
 
         obj = log_probs * batch_advantages[:, None]
         # per-token objective
         obj = (obj * target_masks).sum() / num_target_tokens
         loss = -obj
         loss.backward()
+        sum_loss += loss.item()
 
     # update the policy
     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -217,7 +207,7 @@ def update_policy(
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
     return {
-        "loss": loss.item(),
+        "loss": sum_loss / min(1, step_count),
+        "entropy": sum_entropy / min(1, step_count),
         "grad_norm": grad_norm.item(),
-        "entropy": entropy.item(),
     }

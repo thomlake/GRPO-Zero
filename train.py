@@ -9,15 +9,15 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from countdown_task import CountdownTasksDataset, reward_function
 from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
-from qwen2_model import Transformer
-from tokenizer import Tokenizer
 
 
 def evaluate(model, tokenizer, device, dtype, config):
+    model.eval()
     test_dataset = CountdownTasksDataset(
         data_path=config["data"]["path"],
         tokenizer=tokenizer,
@@ -48,6 +48,7 @@ def evaluate(model, tokenizer, device, dtype, config):
             dtype=dtype,
         )
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
+    model.train()
     return np.mean(success)
 
 
@@ -55,7 +56,6 @@ def main(config_path: str):
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
-    pretrained_model_path = Path(config["model"]["pretrained_model_path"])
     device = torch.device(config["model"]["device"])
     dtype_map = {
         "bfloat16": torch.bfloat16,
@@ -71,7 +71,9 @@ def main(config_path: str):
 
     current_time = datetime.now().strftime(r"%Y%m%d-%H%M%S")
     tb_writer = SummaryWriter(log_dir=f"{config['training']['log_dir']}/{current_time}")
-    tokenizer = Tokenizer(str(pretrained_model_path / "tokenizer.json"))
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["name"])
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     train_dataset = CountdownTasksDataset(
         data_path=config["data"]["path"],
@@ -88,7 +90,12 @@ def main(config_path: str):
         batch_size=NUM_QUESTIONS_PER_BATCH,
     )
 
-    model = Transformer.from_pretrained(pretrained_model_path, device=device).train()
+    model = AutoModelForCausalLM.from_pretrained(
+        config["model"]["name"],
+        torch_dtype=dtype,
+        device_map=device,
+    )
+    model.train()
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
@@ -115,6 +122,7 @@ def main(config_path: str):
         )
         if config["training"]["skip_unfinished_episodes"]:
             episodes = [episode for episode in episodes if episode.is_finished]
+
         results = update_policy(
             model=model,
             optimizer=optimizer,
