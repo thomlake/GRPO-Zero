@@ -146,14 +146,13 @@ def update_policy(
     sum_loss = 0.0
     sum_entropy = 0.0
 
-    model.train()
+    model.eval()
     for batch_idx, i in enumerate(range(0, len(episodes), micro_batch_size), start=1):
         print(
             f"\r* Computing policy gradient: {batch_idx}/{num_micro_batches}",
             flush=True,
             end="",
         )
-        step_count += 1
         j = min(i + micro_batch_size, len(episodes))
         batch_episodes = episodes[i:j]
         batch_lengths = [
@@ -197,12 +196,13 @@ def update_policy(
             token_entropy = compute_entropy(logits)
             sum_entropy += (token_entropy * target_masks).sum().item() / num_target_tokens
 
-        obj = log_probs * batch_advantages[:, None]
+        token_loss = log_probs * batch_advantages[:, None]
         # per-token objective
-        obj = (obj * target_masks).sum() / num_target_tokens
-        loss = -obj
+        loss = -(token_loss * target_masks).sum() / num_target_tokens
         loss.backward()
         sum_loss += loss.item()
+
+        step_count += 1
 
     # update the policy
     grad_norm = torch.nn.utils.clip_grad_norm_(
