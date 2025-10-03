@@ -1,5 +1,4 @@
 import dataclasses
-import gc
 import math
 from collections import defaultdict
 from typing import Callable, List
@@ -40,7 +39,8 @@ def rollout(
     attention_mask = []
     for ids in input_ids:
         pad_len = max_len - len(ids)
-        input_ids_padded.append([pad_token_id] * pad_len + ids)
+        padded_ids = [pad_token_id] * pad_len + ids
+        input_ids_padded.append(padded_ids)
         attention_mask.append([0] * pad_len + [1] * len(ids))
 
     input_ids_tensor = torch.tensor(input_ids_padded, dtype=torch.long, device=device)
@@ -49,15 +49,14 @@ def rollout(
     # Generate
     model.eval()
     with torch.autocast(device_type=device.type, dtype=dtype):
-        with torch.no_grad():
-            outputs = model.generate(
-                input_ids=input_ids_tensor,
-                attention_mask=attention_mask_tensor,
-                max_new_tokens=max_new_tokens,
-                pad_token_id=pad_token_id,
-                eos_token_id=eos_token_id,
-                do_sample=True,
-            )
+        outputs = model.generate(
+            input_ids=input_ids_tensor,
+            attention_mask=attention_mask_tensor,
+            max_new_tokens=max_new_tokens,
+            pad_token_id=pad_token_id,
+            eos_token_id=eos_token_id,
+            do_sample=True,
+        )
 
     # Process outputs into episodes
     episodes = []
@@ -65,8 +64,8 @@ def rollout(
         for j in range(num_answer_per_question):
             idx = i * num_answer_per_question + j
             full_token_ids = outputs[idx].tolist()
-            prefix_len = len(input_ids[idx])
-            generated_token_ids = full_token_ids[prefix_len:]
+            padded_input_len = len(input_ids_padded[idx])
+            generated_token_ids = full_token_ids[padded_input_len:]
 
             # Remove padding and eos tokens
             if pad_token_id in generated_token_ids:
@@ -210,7 +209,7 @@ def update_policy(
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
     return {
-        "loss": sum_loss / min(1, step_count),
-        "entropy": sum_entropy / min(1, step_count),
+        "loss": sum_loss / max(1, step_count),
+        "entropy": sum_entropy / max(1, step_count),
         "grad_norm": grad_norm.item(),
     }

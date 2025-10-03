@@ -164,7 +164,8 @@ def main(config: Config):
             f"grad_norm: {grad_norm:.2f}, duration: {duration:.2f}, "
             f"num_finished_episodes: {num_finished_episodes}, "
             f"mean_response_len: {mean_response_len:.2f}, "
-            f"entropy: {entropy:.2f}"
+            f"entropy: {entropy:.2f}, "
+            f"loss: {loss:.2f}"
         )
         if step % config.training.eval_interval == 0:
             eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
