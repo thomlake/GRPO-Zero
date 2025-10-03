@@ -192,16 +192,15 @@ def update_policy(
             reduction="none",
         ).reshape(input_token_ids.shape[0], -1)
 
+        token_loss = log_probs * batch_advantages[:, None]
+        loss = -(token_loss * target_masks).sum() / num_target_tokens
+        loss.backward()
+
         with torch.no_grad():
             token_entropy = compute_entropy(logits)
             sum_entropy += (token_entropy * target_masks).sum().item() / num_target_tokens
 
-        token_loss = log_probs * batch_advantages[:, None]
-        # per-token objective
-        loss = -(token_loss * target_masks).sum() / num_target_tokens
-        loss.backward()
         sum_loss += loss.item()
-
         step_count += 1
 
     # update the policy

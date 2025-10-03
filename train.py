@@ -23,7 +23,6 @@ def evaluate(
         dtype: torch.dtype,
         config: Config,
 ):
-    model.eval()
     test_dataset = CountdownTasksDataset(
         data_path=config.data.path,
         tokenizer=tokenizer,
@@ -54,7 +53,7 @@ def evaluate(
             dtype=dtype,
         )
         success.extend([episode.reward_info["answer_reward"] for episode in episodes])
-    model.train()
+
     return np.mean(success)
 
 
