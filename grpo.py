@@ -119,7 +119,8 @@ def normalize_rewards_per_group(episodes: List[Episode]) -> List[Episode]:
 
 def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
     probs = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(probs * logits, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    entropy = -torch.sum(probs * log_probs, dim=-1)
     return entropy
 
 
@@ -209,7 +210,7 @@ def update_policy(
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
     return {
-        "loss": sum_loss / max(1, step_count),
-        "entropy": sum_entropy / max(1, step_count),
+        "loss": sum_loss,
+        "entropy": sum_entropy,
         "grad_norm": grad_norm.item(),
     }
