@@ -1,12 +1,12 @@
 model:
   name: Qwen/Qwen2.5-3B-Instruct
-  device: cuda
-  dtype: bfloat16
 data:
   path: Countdown-Tasks-3to4
   test_size: 128
 training:
   random_seed: 1337
+  device: cuda
+  dtype: bfloat16
   max_prompt_len: 256
   max_gen_len: 1024
   batch_size: 256
