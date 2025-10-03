@@ -6,10 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 from config import Config
 from countdown_task import CountdownTasksDataset, reward_function
@@ -17,7 +16,13 @@ from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 
 
-def evaluate(model, tokenizer, device, dtype, config: Config):
+def evaluate(
+        model: PreTrainedModel,
+        tokenizer: PreTrainedTokenizerBase,
+        device: torch.device,
+        dtype: torch.dtype,
+        config: Config,
+):
     model.eval()
     test_dataset = CountdownTasksDataset(
         data_path=config.data.path,
@@ -42,7 +47,7 @@ def evaluate(model, tokenizer, device, dtype, config: Config):
             model=model,
             tokenizer=tokenizer,
             batch=batch,
-            max_gen_len=config.training.max_gen_len * 2,
+            max_new_tokens=2 * config.training.max_new_tokens,
             num_answer_per_question=1,
             reward_function=reward_function,
             device=device,
@@ -83,9 +88,9 @@ def main(config: Config):
     train_dataloader = DataLoader(
         train_dataset,
         shuffle=True,
-        collate_fn=CountdownTasksDataset.collate_fn,
-        generator=generator,
         batch_size=num_questions_per_batch,
+        generator=generator,
+        collate_fn=CountdownTasksDataset.collate_fn,
     )
 
     model = AutoModelForCausalLM.from_pretrained(
