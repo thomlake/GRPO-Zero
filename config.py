@@ -5,16 +5,16 @@ import yaml
 from pydantic import BaseModel, Field
 
 
-class ModelConfig:
+class ModelConfig(BaseModel):
     name: str = 'Qwen/Qwen2.5-3B-Instruct'
 
 
-class DataConfig:
+class DataConfig(BaseModel):
     path: str = 'Countdown-Tasks-3to4'
     test_size: int = 128
 
 
-class TrainingConfig:
+class TrainingConfig(BaseModel):
     device: str = 'cuda'
     dtype: str = 'bfloat16'
     random_seed: int = 1337
@@ -30,7 +30,7 @@ class TrainingConfig:
     betas: list[float] = Field(default_factory=lambda: [0.9, 0.999])
     ckpt_dir: str = "ckpt"
     log_dir: str = "logs"
-    skip_unfinished_episodes: int = False
+    skip_unfinished_episodes: bool = False
     ckpt_save_interval: int = 100
     eval_interval: int = 10
     memory_efficient_adamw: bool = False
