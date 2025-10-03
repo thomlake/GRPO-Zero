@@ -6,6 +6,7 @@ from typing import Callable, List
 
 import numpy as np
 import torch
+from torch.optim import Optimizer
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from data_types import Episode, MiniBatch
@@ -16,7 +17,7 @@ def rollout(
     model: PreTrainedModel,
     batch: MiniBatch,
     tokenizer: PreTrainedTokenizerBase,
-    max_gen_len: int,
+    max_new_tokens: int,
     num_answer_per_question: int,
     reward_function: Callable,
     device: torch.device,
@@ -46,15 +47,17 @@ def rollout(
     attention_mask_tensor = torch.tensor(attention_mask, dtype=torch.long, device=device)
 
     # Generate
+    model.eval()
     with torch.autocast(device_type=device.type, dtype=dtype):
-        outputs = model.generate(
-            input_ids=input_ids_tensor,
-            attention_mask=attention_mask_tensor,
-            max_new_tokens=max_gen_len,
-            do_sample=True,
-            pad_token_id=pad_token_id,
-            eos_token_id=eos_token_id,
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids=input_ids_tensor,
+                attention_mask=attention_mask_tensor,
+                max_new_tokens=max_new_tokens,
+                pad_token_id=pad_token_id,
+                eos_token_id=eos_token_id,
+                do_sample=True,
+            )
 
     # Process outputs into episodes
     episodes = []
@@ -122,8 +125,8 @@ def compute_entropy(logits: torch.Tensor) -> torch.Tensor:
 
 
 def update_policy(
-    model,
-    optimizer,
+    model: PreTrainedModel,
+    optimizer: Optimizer,
     episodes: List[Episode],
     micro_batch_size: int,
     pad_token_id: int,
@@ -143,6 +146,7 @@ def update_policy(
     sum_loss = 0.0
     sum_entropy = 0.0
 
+    model.train()
     for batch_idx, i in enumerate(range(0, len(episodes), micro_batch_size), start=1):
         print(
             f"\r* Computing policy gradient: {batch_idx}/{num_micro_batches}",

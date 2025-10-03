@@ -11,18 +11,19 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard.writer import SummaryWriter
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from config import Config
 from countdown_task import CountdownTasksDataset, reward_function
 from grpo import rollout, update_policy
 from optimizer import MemoryEfficientAdamW
 
 
-def evaluate(model, tokenizer, device, dtype, config):
+def evaluate(model, tokenizer, device, dtype, config: Config):
     model.eval()
     test_dataset = CountdownTasksDataset(
-        data_path=config["data"]["path"],
+        data_path=config.data.path,
         tokenizer=tokenizer,
         split="test",
-        test_size=config["data"]["test_size"],
+        test_size=config.data.test_size,
     )
     generator = torch.Generator(device=device)
     # We reduce the batch size by half as we want to
@@ -32,7 +33,7 @@ def evaluate(model, tokenizer, device, dtype, config):
         shuffle=False,
         collate_fn=CountdownTasksDataset.collate_fn,
         generator=generator,
-        batch_size=config["training"]["batch_size"] // 2,
+        batch_size=config.training.batch_size // 2,
         drop_last=False,
     )
     success = []
@@ -41,7 +42,7 @@ def evaluate(model, tokenizer, device, dtype, config):
             model=model,
             tokenizer=tokenizer,
             batch=batch,
-            max_gen_len=config["training"]["max_gen_len"] * 2,
+            max_gen_len=config.training.max_gen_len * 2,
             num_answer_per_question=1,
             reward_function=reward_function,
             device=device,
@@ -52,34 +53,31 @@ def evaluate(model, tokenizer, device, dtype, config):
     return np.mean(success)
 
 
-def main(config_path: str):
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    device = torch.device(config["model"]["device"])
+def main(config: Config):
+    device = torch.device(config.training.device)
     dtype_map = {
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
         "float32": torch.float32,
     }
-    dtype = dtype_map.get(config["model"]["dtype"], torch.bfloat16)
+    dtype = dtype_map.get(config.training.dtype, torch.bfloat16)
     torch.set_default_device(device)
-    torch.random.manual_seed(config["training"]["random_seed"])
-    BATCH_SIZE = config["training"]["batch_size"]
-    NUM_QUESTIONS_PER_BATCH = config["training"]["num_questions_per_batch"]
-    NUM_ANSWERS_PER_QUESTION = BATCH_SIZE // NUM_QUESTIONS_PER_BATCH
+    torch.random.manual_seed(config.training.random_seed)
+    batch_size = config.training.batch_size
+    num_questions_per_batch = config.training.num_questions_per_batch
+    num_answers_per_batch = batch_size // num_questions_per_batch
 
     current_time = datetime.now().strftime(r"%Y%m%d-%H%M%S")
-    tb_writer = SummaryWriter(log_dir=f"{config['training']['log_dir']}/{current_time}")
-    tokenizer = AutoTokenizer.from_pretrained(config["model"]["name"])
+    tb_writer = SummaryWriter(log_dir=f"{config.training.log_dir}/{current_time}")
+    tokenizer = AutoTokenizer.from_pretrained(config.model.name)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     train_dataset = CountdownTasksDataset(
-        data_path=config["data"]["path"],
+        data_path=config.data.path,
         tokenizer=tokenizer,
         split="train",
-        test_size=config["data"]["test_size"],
+        test_size=config.data.test_size,
     )
     generator = torch.Generator(device=device)
     train_dataloader = DataLoader(
@@ -87,11 +85,11 @@ def main(config_path: str):
         shuffle=True,
         collate_fn=CountdownTasksDataset.collate_fn,
         generator=generator,
-        batch_size=NUM_QUESTIONS_PER_BATCH,
+        batch_size=num_questions_per_batch,
     )
 
     model = AutoModelForCausalLM.from_pretrained(
-        config["model"]["name"],
+        config.model.name,
         torch_dtype=dtype,
         device_map=device,
     )
@@ -99,14 +97,14 @@ def main(config_path: str):
 
     optimizer = MemoryEfficientAdamW(
         model.parameters(),
-        lr=config["training"]["learning_rate"],
-        weight_decay=config["training"]["weight_decay"],
-        betas=config["training"]["betas"],
-        enabled=config["training"]["memory_efficient_adamw"],
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+        betas=config.training.betas,
+        enabled=config.training.memory_efficient_adamw,
     )
 
     start_time = time.time()
-    ckpt_dir = Path(config["training"]["ckpt_dir"])
+    ckpt_dir = Path(config.training.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for step, batch in enumerate(train_dataloader, start=1):
@@ -114,22 +112,22 @@ def main(config_path: str):
             model=model,
             tokenizer=tokenizer,
             batch=batch,
-            max_gen_len=config["training"]["max_gen_len"],
-            num_answer_per_question=NUM_ANSWERS_PER_QUESTION,
+            max_new_tokens=config.training.max_new_tokens,
+            num_answer_per_question=num_answers_per_batch,
             reward_function=reward_function,
             device=device,
             dtype=dtype,
         )
-        if config["training"]["skip_unfinished_episodes"]:
+        if config.training.skip_unfinished_episodes:
             episodes = [episode for episode in episodes if episode.is_finished]
 
         results = update_policy(
             model=model,
             optimizer=optimizer,
             episodes=episodes,
-            micro_batch_size=config["training"]["micro_batch_size"],
+            micro_batch_size=config.training.micro_batch_size,
             pad_token_id=tokenizer.pad_token_id,
-            max_grad_norm=config["training"]["max_grad_norm"],
+            max_grad_norm=config.training.max_grad_norm,
             device=device,
             dtype=dtype,
         )
@@ -164,7 +162,7 @@ def main(config_path: str):
             f"mean_response_len: {mean_response_len:.2f}, "
             f"entropy: {entropy:.2f}"
         )
-        if step % config["training"]["eval_interval"] == 0:
+        if step % config.training.eval_interval == 0:
             eval_success_rate = evaluate(model, tokenizer, device, dtype, config)
             print(f"\rEval success rate: {eval_success_rate:.2f}" + " " * 100)
             tb_writer.add_scalar("success_rate/eval", eval_success_rate, step)
@@ -186,7 +184,7 @@ def main(config_path: str):
             tb_writer.add_text(f"text_{i}", f"<pre>{text}</pre>", step)
 
         # save checkpoint
-        if step % config["training"]["ckpt_save_interval"] == 0:
+        if step % config.training.ckpt_save_interval == 0:
             output_file = ckpt_dir / f"ckpt_{step:06d}.pt"
             torch.save(model.state_dict(), output_file)
             print(f"Saved checkpoint to {output_file}")
@@ -196,4 +194,5 @@ if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--config", type=str, default="config.yaml")
     args = parser.parse_args()
-    main(args.config)
+    config = Config.load_yaml(args.config)
+    main(config)
